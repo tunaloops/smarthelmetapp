@@ -6,11 +6,14 @@ import 'package:untitled/pages/homescreen.dart';
 import 'package:untitled/pages/contacts.dart';
 import 'package:untitled/pages/settings.dart';
 import 'package:untitled/pages/crashhistory.dart';
+import 'package:untitled/services/ai_detection.dart';
 
 Future<void> main() async{
   WidgetsFlutterBinding.ensureInitialized();
 
   await requestBluetoothPermissions();
+
+  await CrashDetectionService().loadModel();
 
   runApp(SmartHelmetApp());
 }
@@ -21,6 +24,8 @@ Future<void> requestBluetoothPermissions() async{
     Permission.bluetoothScan,
     Permission.bluetoothConnect,
     Permission.location,
+    Permission.sms,
+    Permission.phone,
   ].request();
 }
 

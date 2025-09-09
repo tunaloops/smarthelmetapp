@@ -1,4 +1,6 @@
 import 'package:flutter/material.dart';
+import '../services/database_helper.dart';
+import '../models/crash_log.dart';
 
 class CrashHistoryScreen extends StatefulWidget {
   const CrashHistoryScreen({super.key});
@@ -8,20 +10,45 @@ class CrashHistoryScreen extends StatefulWidget {
 }
 
 class _CrashHistoryScreenState extends State<CrashHistoryScreen> {
-  List<String> logs = [
-    'Crash at 10:21 am - Location xyz',
-    'Crash at 4:21 am - Location xyz'
-  ];
+  List<CrashLog> _logs = [];
+  bool _loading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadLogs();
+  }
+
+  Future<void> _loadLogs() async {
+    final logs = await DatabaseHelper().getCrashLogs();
+    setState(() {
+      _logs = logs;
+      _loading = false;
+    });
+  }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      body: ListView.builder(
-          itemCount: logs.length,
-          itemBuilder: (_, index) => ListTile(
-            leading: Icon(Icons.warning, color: Colors.red),
-            title: Text(logs[index]),
-          )),
+      appBar: AppBar(title: const Text("Crash History")),
+      body: _loading
+          ? const Center(child: CircularProgressIndicator())
+          : _logs.isEmpty
+          ? const Center(child: Text("No crash history found."))
+          : RefreshIndicator(
+        onRefresh: _loadLogs,
+        child: ListView.builder(
+          itemCount: _logs.length,
+          itemBuilder: (_, index) {
+            final log = _logs[index];
+            return ListTile(
+              leading: const Icon(Icons.warning, color: Colors.red),
+              title: Text("Crash at ${log.timestamp}"),
+              subtitle: Text("Location: ${log.location}"),
+            );
+          },
+        ),
+      ),
     );
   }
 }

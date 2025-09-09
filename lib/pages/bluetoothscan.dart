@@ -14,6 +14,9 @@ class BluetoothScanScreen extends StatefulWidget {
 class _BluetoothScanScreenState extends State<BluetoothScanScreen> {
   List<ScanResult> _devices = [];
   Timer? _debounce;
+  StreamSubscription<List<ScanResult>>? _scanSub;
+  StreamSubscription<BluetoothAdapterState>? _adapterStateSub;
+  bool _isScanning = false;
 
   @override
   void initState() {
@@ -30,75 +33,125 @@ class _BluetoothScanScreenState extends State<BluetoothScanScreen> {
 
   Future<void> _initializeBluetooth() async {
     try {
-      if (await Permission.bluetoothScan.request().isGranted &&
-          await Permission.bluetoothConnect.request().isGranted &&
-          await Permission.locationWhenInUse.request().isGranted) {
-        if (await BluetoothManager().isBluetoothEnabled()) {
-          await BluetoothManager().startScan();
-          BluetoothManager().scanResults.listen((results) {
-            if (_debounce?.isActive ?? false) _debounce!.cancel();
-            _debounce = Timer(const Duration(milliseconds: 500), () {
-              setState(() {
-                // Show all devices
-                _devices = results;
-                // Commented out filter to show only helmet devices (can be re-enabled later)
-                // _devices = results.where((result) {
-                //   return result.advertisementData.serviceUuids
-                //       .contains('YOUR_ESP32_SERVICE_UUID');
-                // }).toList();
-              });
-            });
-          });
-        } else {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Please enable Bluetooth')),
-          );
-        }
-      } else {
+      // Request runtime permissions (Android 12+ requires scan/connect)
+      final scanOk = await Permission.bluetoothScan.request().isGranted;
+      final connectOk = await Permission.bluetoothConnect.request().isGranted;
+      // Location is still commonly required for scanning on many Android versions
+      final locOk = await Permission.locationWhenInUse.request().isGranted;
+
+      if (!(scanOk && connectOk && locOk)) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('Bluetooth permissions denied')),
         );
+        return;
       }
+
+      final supported = await FlutterBluePlus.isSupported;
+      if (!supported) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Bluetooth not supported on this device')),
+        );
+        return;
+      }
+
+      // Watch adapter power state (optional UX)
+      _adapterStateSub = FlutterBluePlus.adapterState.listen((s) {
+        if (s != BluetoothAdapterState.on) {
+          setState(() {
+            _devices = [];
+            _isScanning = false;
+          });
+        }
+      });
+
+      final isOn = await FlutterBluePlus.isOn;
+      if (!isOn) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Please turn on Bluetooth')),
+        );
+        return;
+      }
+
+      await _startScan();
     } catch (e) {
+      if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('Error starting scan: $e')),
       );
     }
   }
 
+  Future<void> _startScan() async {
+    try {
+      setState(() {
+        _devices = [];
+        _isScanning = true;
+      });
+
+      // Start scan (adjust timeout as you like)
+      await FlutterBluePlus.startScan(timeout: const Duration(seconds: 10));
+
+      // Listen to results
+      _scanSub?.cancel();
+      _scanSub = FlutterBluePlus.scanResults.listen((results) {
+        // Debounce UI updates to avoid excessive rebuilds
+        _debounce?.cancel();
+        _debounce = Timer(const Duration(milliseconds: 300), () {
+          if (!mounted) return;
+          setState(() {
+            _devices = results;
+          });
+        });
+      }, onDone: () {
+        if (mounted) {
+          setState(() => _isScanning = false);
+        }
+      });
+
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _isScanning = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Scan failed: $e')),
+      );
+    }
+  }
+
+  Future<void> _stopScan() async {
+    try {
+      await FlutterBluePlus.stopScan();
+    } catch (_) {}
+    if (mounted) setState(() => _isScanning = false);
+  }
+
   @override
   void dispose() {
     _debounce?.cancel();
-    BluetoothManager().stopScan();
-    BluetoothManager().dispose();
+    _scanSub?.cancel();
+    _adapterStateSub?.cancel();
+    _stopScan();
+    // Removed: BluetoothManager().dispose();  // not needed, and may kill connection streams globally
     super.dispose();
   }
 
-  void _connectToDevice(BluetoothDevice device) async {
+  Future<void> _connectToDevice(BluetoothDevice device) async {
     try {
-      // Check if device advertises the helmet service UUID
-      final scanResult = _devices.firstWhere(
-            (result) => result.device.id == device.id,
-        orElse: () => throw Exception('Device not found in scan results'),
-      );
-      if (!scanResult.advertisementData.serviceUuids
-          .contains('YOUR_ESP32_SERVICE_UUID')) {
+      await _stopScan();
+      if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-              content: Text('Selected device may not be a compatible helmet')),
+          const SnackBar(content: Text('Connecting...')),
         );
-        return;
       }
 
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Connecting...')),
-      );
       await BluetoothManager().connectToDevice(device);
+
+      if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Connected successfully')),
       );
       Navigator.pop(context);
     } catch (e) {
+      if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('Connection failed: $e')),
       );
@@ -107,30 +160,39 @@ class _BluetoothScanScreenState extends State<BluetoothScanScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final scanningWidget = _isScanning
+        ? const Padding(
+      padding: EdgeInsets.only(right: 16.0),
+      child: Center(child: SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2))),
+    )
+        : IconButton(
+      tooltip: 'Rescan',
+      icon: const Icon(Icons.refresh),
+      onPressed: _startScan,
+    );
+
     return Scaffold(
-      appBar: AppBar(title: const Text('Select Helmet')),
+      appBar: AppBar(
+        title: const Text('Select Helmet'),
+        actions: [scanningWidget],
+      ),
       body: _devices.isEmpty
-          ? const Center(child: CircularProgressIndicator())
+          ? Center(
+        child: _isScanning
+            ? const Text('Scanning for devices...')
+            : const Text('No devices found. Tap refresh to rescan.'),
+      )
           : ListView.builder(
         itemCount: _devices.length,
         itemBuilder: (context, index) {
           final result = _devices[index];
-          final isHelmet = result.advertisementData.serviceUuids
-              .contains('YOUR_ESP32_SERVICE_UUID');
+          final name = (result.device.name.isNotEmpty)
+              ? result.device.name
+              : 'Unnamed Device';
           return ListTile(
-            title: Text(
-              result.device.name.isNotEmpty
-                  ? result.device.name
-                  : 'Unnamed Device',
-              style: TextStyle(
-                fontWeight: isHelmet ? FontWeight.bold : FontWeight.normal,
-              ),
-            ),
-            subtitle: Text(
-                '${result.device.id.id} (RSSI: ${result.rssi} dBm)'),
-            trailing: isHelmet
-                ? const Icon(Icons.verified, color: Colors.green)
-                : null,
+            leading: const Icon(Icons.bluetooth),
+            title: Text(name),
+            subtitle: Text('${result.device.id.id}  •  RSSI: ${result.rssi} dBm'),
             onTap: () => _connectToDevice(result.device),
           );
         },
