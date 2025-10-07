@@ -1,13 +1,14 @@
 import 'package:flutter/material.dart';
-import 'package:untitled/pages/contacts.dart';
-import 'package:untitled/pages/crashhistory.dart';
-import 'package:untitled/pages/dashboard.dart';
-import 'package:untitled/pages/livemonitor.dart';
-import 'package:untitled/pages/settings.dart';
-import 'package:permission_handler/permission_handler.dart';
+import 'dashboard.dart';
+import 'livemonitor.dart';
+import 'contacts.dart';
+import 'crashhistory.dart';
+import 'settings.dart';
 
 class Homescreen extends StatefulWidget {
-  const Homescreen({super.key});
+  final ValueNotifier<ThemeMode> themeNotifier;
+
+  const Homescreen({super.key, required this.themeNotifier});
 
   @override
   State<Homescreen> createState() => _HomescreenState();
@@ -15,37 +16,31 @@ class Homescreen extends StatefulWidget {
 
 class _HomescreenState extends State<Homescreen> {
   int _currentIndex = 0;
-  final List<Widget> _pages = [
-    Dashboard(),
-    LiveMonitoringScreen(),
-    EmergencyContactsScreen(),
-    CrashHistoryScreen(),
-    SettingsScreen(),
-  ];
 
-  void _onItemTapped(int index) {
-    setState(() {
-      _currentIndex = index;
-    });
+  late final List<Widget> _pages;
+
+  @override
+  void initState() {
+    super.initState();
+    _pages = [
+      const Dashboard(),
+      const LiveMonitoringScreen(),
+      const EmergencyContactsScreen(),
+      const CrashHistoryScreen(),
+      SettingsScreen(themeNotifier: widget.themeNotifier),
+    ];
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(
-        title: Text('Smart Helmet'),
-        backgroundColor: Colors.indigo,
-      ),
       body: _pages[_currentIndex],
       bottomNavigationBar: BottomNavigationBar(
         currentIndex: _currentIndex,
-        onTap: _onItemTapped,
-        type: BottomNavigationBarType.fixed,
-        selectedItemColor: Colors.indigo,
-        unselectedItemColor: Colors.blueGrey,
-        items: [
-          BottomNavigationBarItem(icon: Icon(Icons.dashboard_sharp), label: 'Dashboard'),
-          BottomNavigationBarItem(icon: Icon(Icons.motorcycle_rounded), label: 'Live'),
+        onTap: (index) => setState(() => _currentIndex = index),
+        items: const [
+          BottomNavigationBarItem(icon: Icon(Icons.home), label: 'Home'),
+          BottomNavigationBarItem(icon: Icon(Icons.monitor_heart), label: 'Live'),
           BottomNavigationBarItem(icon: Icon(Icons.contacts), label: 'Contacts'),
           BottomNavigationBarItem(icon: Icon(Icons.history), label: 'History'),
           BottomNavigationBarItem(icon: Icon(Icons.settings), label: 'Settings'),

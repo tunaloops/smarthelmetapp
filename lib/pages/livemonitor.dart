@@ -1,10 +1,15 @@
 import 'dart:async';
+import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:share_plus/share_plus.dart';
 import '../services/alert_manager.dart';
 import '../services/data_handler.dart';
 import '../services/database_helper.dart';
 import '../services/ai_detection.dart'; // CrashDetectionService
 import '../services/bluetooth_manager.dart';
+import '../services/crash_confirmation_dialog.dart';
+import '../services/alarm_service.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 
 class LiveMonitoringScreen extends StatefulWidget {
@@ -42,6 +47,7 @@ class _LiveMonitoringScreenState extends State<LiveMonitoringScreen> {
 
   @override
   void dispose() {
+    _alarmService.stopAlarm();
     _dataSubscription?.cancel();
     _connectionSubscription?.cancel();
     _autoDetectionTimer?.cancel();
@@ -140,32 +146,43 @@ class _LiveMonitoringScreenState extends State<LiveMonitoringScreen> {
         });
   }
 
-  Future<void> _simulateCrash() async {
-    final contacts = await DatabaseHelper().getContacts();
-    if (contacts.isNotEmpty) {
-      final alertManager = AlertManager();
-      try {
-        await alertManager.sendEmergencyAlerts(contacts);
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text("🚨 Crash simulated — alerts sent!")),
-          );
-        }
-      } catch (e) {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text("❌ Failed to send alerts: $e")),
-          );
-        }
-      }
+  final AlarmService _alarmService = AlarmService();
+  Future<void> _showCrashConfirmationDialog(double probability) async {
+    // Vibrate and play alarm
+    await _alarmService.triggerAlarm();
+
+    bool? userIsSafe = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false, // Can't dismiss by tapping outside
+      builder: (BuildContext context) {
+        return CrashConfirmationDialog(
+          probability: probability,
+          onConfirm: () {
+            _alarmService.stopAlarm();
+            Navigator.of(context).pop(true);  // User is OK
+          },
+          onTimeout: () {
+            Navigator.of(context).pop(false); // Send alert
+          }
+        );
+      },
+    );
+
+    if (userIsSafe == null || userIsSafe == false) {
+      // User didn't respond or timeout - send emergency alerts
+      await _triggerEmergencyAlert();
+      await _alarmService.stopAlarm();
     } else {
+      // User confirmed they're OK
+      print("User confirmed safe - crash alert cancelled");
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text("⚠️ No emergency contacts saved!")),
+          const SnackBar(content: Text("Crash alert cancelled")),
         );
       }
     }
   }
+
 
   Future<void> _triggerEmergencyAlert() async {
     final contacts = await DatabaseHelper().getContacts();
@@ -191,15 +208,18 @@ class _LiveMonitoringScreenState extends State<LiveMonitoringScreen> {
   // 🔄 Use new detectCrash pipeline
   Future<void> _checkForCrash() async {
     try {
-      bool crashDetected = await _crashDetection.detectCrash();
+      Map<String, dynamic> result = await _crashDetection.detectCrash();
+      bool crashDetected = result['detected'] ?? false;
+      double probability = result['probability'] ?? 0.0;
+
       if (crashDetected) {
-        print("🚨 CRASH DETECTED by AI model!");
-        await _triggerEmergencyAlert();
+        print("🚨 CRASH DETECTED by AI model! Probability: ${probability.toStringAsFixed(3)}");
+        await _showCrashConfirmationDialog(probability);
       } else {
-        print("✅ Normal movement detected by AI model");
+        print("✅ Normal movement detected by AI model (prob: ${probability.toStringAsFixed(3)})");
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text("✅ AI says: Normal movement")),
+            SnackBar(content: Text("✅ AI says: Normal (${(probability * 100).toStringAsFixed(1)}% crash prob)")),
           );
         }
       }
@@ -215,13 +235,37 @@ class _LiveMonitoringScreenState extends State<LiveMonitoringScreen> {
 
   Future<void> _checkForCrashSilent() async {
     try {
-      bool crashDetected = await _crashDetection.detectCrash();
+      Map<String, dynamic> result = await _crashDetection.detectCrash();
+      bool crashDetected = result['detected'] ?? false;
+
       if (crashDetected) {
-        print("🚨 AUTOMATIC CRASH DETECTED by AI model!");
-        await _triggerEmergencyAlert();
+        double probability = result['probability'] ?? 0.0;
+        print("🚨 AUTOMATIC CRASH DETECTED by AI model! Probability: ${probability.toStringAsFixed(3)}");
+        await _showCrashConfirmationDialog(probability);
       }
     } catch (e) {
       print("❌ Error in automatic crash detection: $e");
+    }
+  }
+
+  Future<void> _exportSensorLog() async {
+    try {
+      await _crashDetection.exportBufferToCSV();
+
+      final dir = await getApplicationDocumentsDirectory();
+      final file = File('${dir.path}/sensor_buffer.csv');
+
+      if (await file.exists()) {
+        await Share.shareXFiles([XFile(file.path)], text: "Sensor data for crash detection validation");
+
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text("Exported ${_crashDetection.bufferSize} samples")),
+          );
+        }
+      }
+    } catch (e) {
+      print("Export error: $e");
     }
   }
 
@@ -365,39 +409,7 @@ class _LiveMonitoringScreenState extends State<LiveMonitoringScreen> {
               ),
             ),
 
-            // Action Buttons
             const SizedBox(height: 20),
-            Row(
-              children: [
-                Expanded(
-                  child: ElevatedButton(
-                    onPressed: isConnected ? _checkForCrash : null,
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: Colors.orange,
-                      padding: const EdgeInsets.symmetric(vertical: 15),
-                    ),
-                    child: const Text(
-                      "🤖 Test AI Detection",
-                      style: TextStyle(fontSize: 16),
-                    ),
-                  ),
-                ),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: ElevatedButton(
-                    onPressed: _simulateCrash,
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: Colors.red,
-                      padding: const EdgeInsets.symmetric(vertical: 15),
-                    ),
-                    child: const Text(
-                      "🚨 Simulate Crash",
-                      style: TextStyle(fontSize: 16),
-                    ),
-                  ),
-                ),
-              ],
-            ),
           ],
         ),
       ),
